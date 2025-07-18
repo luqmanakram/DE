@@ -2,69 +2,103 @@
 # coding: utf-8
 
 import pandas as pd
-import argparse
 from sqlalchemy import create_engine
 from time import time
-import os
+import argparse
+import requests
 
 def main(params):
-    user = params.user
-    password = params.password
-    host = params.host
-    port = params.port
-    db = params.db
-    table_name = params.table_name
-   # parquet_name = 'output.parquet'
-    csv_path = params.url
+    user=params.user
+    password=params.password
+    host=params.host
+    port=params.port
+    db=params.db
+    table_name=params.table_name
+    url = params.url
+    
+    response = requests.get(url)
+    with open("output.parquet","wb") as f:
+        f.write(response.content)
 
-    #os.system(f"wget {url} -O {parquet_name}")
+    #download paraquet
+    df1 = pd.read_parquet("output.parquet")
+    #save as csv
+    df1.to_csv("output.csv",index=False)
+    
+    csv_name  = 'output.csv'
+
 
     engine = create_engine(f'postgresql://{user}:{password}@{host}:{port}/{db}')
-   
-    df_iter=pd.read_csv(csv_path,iterator=True, chunksize=100000)
 
-    df = next(df_iter)
+    
+    df_iter = pd.read_csv(csv_name, iterator=True, chunksize=100000)
 
-    df.tpep_pickup_datetime = pd.to_datetime(df.tpep_pickup_datetime)
-    df.tpep_dropoff_datetime = pd.to_datetime(df.tpep_dropoff_datetime)
+    # Create table with just headers
+    first_chunk = next(df_iter)
+    first_chunk.tpep_dropoff_datetime = pd.to_datetime(first_chunk.tpep_dropoff_datetime)
+    first_chunk.tpep_pickup_datetime = pd.to_datetime(first_chunk.tpep_pickup_datetime)
+    first_chunk.head(0).to_sql(name=table_name, con=engine, if_exists='replace')
 
-    df.head(n=0).to_sql(name = table_name ,con=engine , if_exists='replace')
-    df.to_sql(name = table_name , con=engine , if_exists='append')
+    # Insert the first chunk
+    first_chunk.to_sql(name=table_name, con=engine, if_exists='append')
 
+    # Loop through remaining chunks
+    for chunk in df_iter:
+        t_start = time()
+        chunk.tpep_dropoff_datetime = pd.to_datetime(chunk.tpep_dropoff_datetime)
+        chunk.tpep_pickup_datetime = pd.to_datetime(chunk.tpep_pickup_datetime)
 
-    while True:
-        t_start=time()
-        df=next(df_iter)
-
-        df.tpep_pickup_datetime = pd.to_datetime(df.tpep_pickup_datetime)
-        df.tpep_dropoff_datetime = pd.to_datetime(df.tpep_dropoff_datetime)
-
-        df.to_sql(name = table_name , con=engine , if_exists='append')
+        chunk.to_sql(name=table_name, con=engine, if_exists='append')
         t_end = time()
+        print("Inserted another chunk, took %.3f seconds" % (t_end - t_start))
 
-        
-        print("Insterted Another Chunk ..., took %.3f second" %(t_end-t_start))
-        
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Ingest Parquet data to Postgres')
+if __name__ == '__main__':
 
-    # user
-    # password
-    # host
-    # port
-    # database
-    # name
-    # table name
-    # url of the Parquet file
-
-    parser.add_argument('--user', help='user name for the postgres')
-    parser.add_argument('--password', help='password for the postgre')
-    parser.add_argument('--host', help='host for postgres')
-    parser.add_argument('--port', help='port for the postgres')
-    parser.add_argument('--db', help='database name for the postgres')
-    parser.add_argument('--table_name', help='name of the table where we will write the results to')
-    parser.add_argument('--url', help='url of of the parquet fi')
+    parser = argparse.ArgumentParser(description='Ingest Paraquet data to postgres')
+    parser.add_argument('--user',help='user name of the postgres')
+    parser.add_argument('--password',help='Password of the postgres')
+    parser.add_argument('--host',help='host for postgres')
+    parser.add_argument('--port',help='port for the postgres')
+    parser.add_argument('--db',help='db')
+    parser.add_argument('--table_name',help='Name of the table in postgres')
+    parser.add_argument('--url',help='Location of the file')
 
     args = parser.parse_args()
-
     main(args)
+
+################ Script to run without docker
+python ingest_data.py --user=root --password=root --host=localhost --port=5432 --db=ny_taxi_data --table_name=yellow_taxi_trips --url=${URL}
+
+
+
+################ Postgres
+$ docker run -it \
+-e POSTGRES_USER="root" \
+-e POSTGRES_PASSWORD="root" \
+-e POSTGRES_DB="ny_taxi" \
+-v c:/Users/Hp/Desktop/dockertest/ny_taxi_data:/var/lib/postgresql/data \
+-p 5432:5432 \
+--network=pg_network \
+--name pg_database \
+postgres:13
+
+###############Pgadmin
+docker run -it -e PGADMIN_DEFAULT_EMAIL="admin@admin.com" -e PGADMIN_DEFAULT_PASSWORD="root" -p 8080:80 --network=pg_network --name pgadmin dpage/pgadmin4
+
+###############Docker build -t taxi_ingest:v01 .
+
+###############Docker Run command
+docker run -it \
+--network=pg_network \
+taxi_ingest:v01 \
+--user=root --password=root --host=pg_database --port=5432 --db=ny_taxi_data --table_name=yellow_taxi_trips --url=${URL}
+
+###############Docker File
+FROM python:latest
+
+RUN pip install pandas sqlalchemy psycopg2 requests pyarrow
+
+WORKDIR /app
+COPY Ingest_data.py Ingest_data.py
+
+ENTRYPOINT [ "python","Ingest_data.py" ]
